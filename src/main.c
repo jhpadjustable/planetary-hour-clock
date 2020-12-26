@@ -1,26 +1,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-//#include <stdio.h>
 #include <math.h>
 #include <time.h>
 #include <libopencm3/cm3/scb.h>
-#include <libopencm3/stm32/desig.h>
 #include <libopencm3/stm32/rcc.h>
+#include <libopencm3/stm32/f1/bkp.h>
 #include <libopencm3/stm32/rtc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/timer.h>
-#include <libopencm3/stm32/exti.h>
-#include <libopencm3/stm32/spi.h>
 #include <libopencm3/cm3/nvic.h>
-//#include <libopencm3/stm32/f1/syscfg.h>
 
 #include <libopencm3/cm3/systick.h>
 
+#include "clock.h"
 #include "main.h"
 #include "glyphs.h"
 #include "video.h"
 
+// TODO find the right header file for this
+extern time_t my_mktime(struct tm *);
 
 
 #ifndef M_PI
@@ -34,10 +33,32 @@
 
 
 
-float conf_lon = -83.25, conf_lat = 42.25;
+
+float conf_lon = -74.0000f, conf_lat = 40.7134f;
 int conf_tz = -300;
+bool conf_fmt_ampm = false;
+bool conf_fmt_secs = true;
+bool conf_fmt_isecs = CONF_INFO_SECONDS;
+bool conf_fmt_fullyr = false;
+uint8_t conf_bright = 5, conf_speed = 1;
+uint8_t conf_fmt_date = 0;
+uint8_t conf_div = 2;
+uint8_t conf_vchime = 0;
+
 
 volatile uint64_t ticks;
+
+static const int bit_time_count = (F_CLOCK_MHZ / 6);
+
+static const uint16_t daynames[] = {'SU','MO','TU','WE','TH','FR','SA'};
+
+static const uint16_t legend_ampm[] = { '24','12' };
+static const uint16_t legend_secs[] = { 'NO',':S' };
+static const uint16_t legend_date[] = { 'MD','DM','YM','D ' };
+
+static const uint8_t bright_map[10] = {0,1,2,3,4,5,7,9,12,15};
+
+static int16_t frame_times[4] = { 150, 125, 100, 80 };
 
 
 void
@@ -45,21 +66,17 @@ gpio_setup(void)
 {
         rcc_periph_clock_enable(RCC_GPIOA);
         rcc_periph_clock_enable(RCC_GPIOB);
-        rcc_periph_clock_enable(RCC_GPIOC);
 
 	gpio_set_mode(BUTTON_1_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, BUTTON_1_PIN);
-	gpio_clear(BUTTON_1_PORT, BUTTON_1_PIN);
+	(BUTTON_1_INVERT ? gpio_set : gpio_clear)(BUTTON_1_PORT, BUTTON_1_PIN);
 	gpio_set_mode(BUTTON_2_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, BUTTON_2_PIN);
-	gpio_clear(BUTTON_2_PORT, BUTTON_2_PIN);
+	(BUTTON_2_INVERT ? gpio_set : gpio_clear)(BUTTON_2_PORT, BUTTON_2_PIN);
 
-	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
-	gpio_clear(GPIOC, GPIO13);
+	gpio_set_mode(M7219_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_OPENDRAIN,
+		M7219_DO_PIN|M7219_CLK_PIN|M7219_LOAD_PIN);
+	gpio_clear(M7219_PORT,
+		M7219_DO_PIN|M7219_CLK_PIN|M7219_LOAD_PIN);
 
-	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO3|GPIO5|GPIO7);
-	gpio_clear(GPIOA, GPIO3|GPIO5|GPIO7);
-
-	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO6|GPIO7|GPIO8|GPIO9);
-	gpio_clear(GPIOB, GPIO6|GPIO7|GPIO8|GPIO9);
 }
 
 #define RCC_CLOCK_SETUP_BY_MHZ_(f) rcc_clock_setup_in_hse_8mhz_out_ ## f ## mhz()
@@ -85,62 +102,84 @@ void systick_setup(void)
 
 static volatile int rtc_first_status = 0;
 
+
+bool
+app_bkpconfig_exists(void)
+{
+	return BKP_DR10 == MAIN_APP_SIG;
+}
+
+
+void
+app_bkpconfig_write(void)
+{
+	BKP_DR1 = (int16_t) lrintf(conf_lon * 60.f);
+	BKP_DR2 = (int16_t) lrintf(conf_lat * 60.f);
+	BKP_DR3 = (int16_t) ((conf_tz / 15) & 0x3f)
+		| ((conf_bright & 0xf) << 6)
+		| ((conf_speed & 0x3) << 10)
+		| ((conf_div & 0x7) << 13);
+	BKP_DR4 = (conf_fmt_ampm ? (1 << 0) : 0)
+		| (conf_fmt_secs ? (1 << 1) : 0)
+		| ((conf_fmt_date & 3) << 2)
+		| ((conf_vchime & 3) << 4);
+	BKP_DR10 = MAIN_APP_SIG;
+}
+
+void
+app_bkpconfig_read(void)
+{
+	conf_lon = (float)((int16_t) BKP_DR1) / 60.f;
+	conf_lat = (float)((int16_t) BKP_DR2) / 60.f;
+	uint16_t dr3 = BKP_DR3;
+	conf_tz = ((dr3 & 0x1f) - (dr3 & 0x20)) * 15;
+	conf_bright = (dr3 >> 6) & 0xf;
+	conf_speed = (dr3 >> 10) & 0x3;
+	conf_div = (dr3 >> 13) & 0x7;
+	uint16_t dr4 = BKP_DR4;
+	conf_fmt_ampm = (dr4 >> 0) & 1;
+	conf_fmt_secs = (dr4 >> 1) & 1;
+	conf_fmt_date = (dr4 >> 2) & 3;
+	conf_vchime = (dr4 >> 4) & 3;
+}
+
 void
 rtc_setup(void)
 {
 	rtc_first_status = RTC_CRL;
 
 	rtc_auto_awake(RCC_LSE, 0x7fff);
+
+	if (!app_bkpconfig_exists())
+		app_bkpconfig_write();
+	
+	app_bkpconfig_read();
 }
-
-void
-spi_setup(void)
-{
-	rcc_periph_clock_enable(RCC_SPI1);
-
-	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO3);
-	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO5|GPIO7);
-
-	spi_reset(SPI1);
-	spi_set_master_mode(SPI1);
-	spi_set_baudrate_prescaler(SPI1, SPI_CR1_BAUDRATE_FPCLK_DIV_256);
-	spi_set_standard_mode(SPI1, 0);
-	spi_set_dff_8bit(SPI1);
-	spi_send_msb_first(SPI1);
-	// spi_set_bidirectional_transmit_only_mode(SPI1);
-
-	spi_enable_software_slave_management(SPI1);
-	spi_set_nss_high(SPI1);
-
-	spi_enable(SPI1);
-}
-
-static const int bit_time_count = (F_CLOCK_MHZ / 6);
 
 static inline void
-bit_time()
+bit_time(void)
 {
 	for (volatile int x = bit_time_count; x; x--);
 }
 
 void
-m7219_send(uint32_t spi, uint16_t msg)
+m7219_send(uint16_t msg)
 {
 	bit_time();
 	for (int bits = 15; bits >= 0; bits--) {
 		if (msg & (1 << bits))
-			gpio_set(GPIOA, GPIO7);
+			gpio_set(M7219_PORT, M7219_DO_PIN);
 		else
-			gpio_clear(GPIOA, GPIO7);
+			gpio_clear(M7219_PORT, M7219_DO_PIN);
 		bit_time();
-		gpio_set(GPIOA, GPIO5);
+		gpio_set(M7219_PORT, M7219_CLK_PIN);
 		bit_time();
-		gpio_clear(GPIOA, GPIO5);
+		gpio_clear(M7219_PORT, M7219_CLK_PIN);
 		bit_time();
 	}
-	gpio_set(GPIOA, GPIO3);
+	gpio_set(M7219_PORT, M7219_LOAD_PIN);
 	bit_time();
-	gpio_clear(GPIOA, GPIO3);
+	gpio_clear(M7219_PORT, M7219_LOAD_PIN);
 }
 
 
@@ -150,6 +189,12 @@ sys_tick_handler(void)
 	ticks++;
 }
 
+
+static char
+to_base_36(int i)
+{
+	return (i < 10 ? '0' : 'A' - 10) + i;
+}
 
 float
 norm(float L, float interval)
@@ -240,7 +285,7 @@ input_button_consume(int button, int mask)
 	if (button > BUTTON_COUNT)
 		return 0;
 	int ret = 0;
-	if (ret = (button_down_pending[button] & mask))
+	if ((ret = (button_down_pending[button] & mask)))
 		button_down_pending[button] &= ~ret;
 	return ret;
 }
@@ -266,23 +311,18 @@ input_button_flush_all(void)
 void
 input_process(void)
 {
-	int bt;
 	if (BUTTON_1_IS_PRESSED && BUTTON_2_IS_PRESSED)
 		return;
 
 	input_handle_button(0, BUTTON_1_IS_PRESSED);
 	input_handle_button(1, BUTTON_2_IS_PRESSED);
-
-	(input_button_peek(0, BUTTON_SHORT) ? gpio_set : gpio_clear)(GPIOB, GPIO9);
-	(input_button_peek(0, BUTTON_LONG) ? gpio_set : gpio_clear)(GPIOB, GPIO8);
-	(input_button_peek(0, BUTTON_REPEAT) ? gpio_set : gpio_clear)(GPIOB, GPIO7);
-	(input_button_peek(1, BUTTON_SHORT) ? gpio_set : gpio_clear)(GPIOC, GPIO13);
-	//(input_button_consume(1, BUTTON_SHORT) ? gpio_set : gpio_clear)(GPIOB, GPIO6);
 }
 
-const char *daynames[] = {"SU","MO","TU","WE","TH","FR","SA"};
-
-
+void
+m7219_send_brightness(void)
+{
+	m7219_send(0xA00 + bright_map[conf_bright]);
+}
 
 void
 video_hour_begin(void)
@@ -291,6 +331,8 @@ video_hour_begin(void)
 	input_button_flush_all();
 	video_pan_limit = 0;
 	video_pan_return = false;
+	m7219_send_brightness();
+	app_bkpconfig_write();
 
 }
 
@@ -308,13 +350,13 @@ phour_get(time_t gmtt, float lat, float lon, int tz, float *outStart, float *out
 	
 	gmtime_r(&localtt, &gmt);
 
-	hnow = norm((float)(gmt.tm_hour) + (gmt.tm_min / 60.f), 24);
+	hnow = norm((float)(gmt.tm_hour) + (gmt.tm_min / 60.f) + (gmt.tm_sec / 3600.f), 24);
 
 
 	if (sunrise_sunset(gmt.tm_yday + 1, lat, lon, true, tz, &hrise))
-		return -1.f; // TODO show error
+		return -1.f;
 	if (sunrise_sunset(gmt.tm_yday + 1, lat, lon, false, tz, &hset))
-		return -1.f; // TODO show error
+		return -1.f;
 
 	if (!(hnow >= hrise && hnow <= hset)) {
 		night = true;
@@ -322,12 +364,12 @@ phour_get(time_t gmtt, float lat, float lon, int tz, float *outStart, float *out
 		if (hnow > hset) { // evening
 			hrise = hset;
 			if (sunrise_sunset(gmt.tm_yday + 2, lat, lon, true, tz, &hset))
-				return -1.f; // TODO show error
+				return -1.f;
 			hset += 24.f;
 		} else { // morning
 			hset = hrise + 24.f;
 			if (sunrise_sunset(gmt.tm_yday, lat, lon, false, tz, &hrise))
-				return -1.f; // TODO show error
+				return -1.f;
 			hnow += 24.f;
 			gmt.tm_wday = (gmt.tm_wday + 6) % 7;
 		}
@@ -352,6 +394,22 @@ phour_get(time_t gmtt, float lat, float lon, int tz, float *outStart, float *out
 float video_hour_current_start, video_hour_current_end;
 
 void
+str_2digits(char **buf, int n)
+{
+	*(*buf)++ = to_base_36(n / 10);
+	*(*buf)++ = (n % 10) + '0';
+}
+
+void
+str_2digits_lno(char **buf, int n)
+{
+	if (n >= 100)
+		*(*buf)++ = to_base_36(n / 10);
+	*(*buf)++ = (n % 10) + '0';
+}
+
+
+void
 video_hour_show_current(void)
 {
 	char bufb[30];
@@ -374,27 +432,31 @@ video_hour_show_current(void)
 	int ihs = (int)(hset), ims = (int)(hset * 60.f) % 60;
 
 	*buf++ = ' ';
-	*buf++ = (ihr / 10) + '0';
-	*buf++ = (ihr % 10) + '0';
+	str_2digits(&buf, ihr);
 	*buf++ = ':';
-	*buf++ = (imr / 10) + '0';
-	*buf++ = (imr % 10) + '0';
-	//*buf++ = ':';
-	//*buf++ = (gmt.tm_sec / 10) + '0';
-	//*buf++ = (gmt.tm_sec % 10) + '0';
+	str_2digits(&buf, imr);
+	if (conf_fmt_isecs) {
+		int isr = (int)(hrise * 3600.f) % 60;
+		*buf++ = ':';
+		str_2digits(&buf, isr);
+	}
 	*buf++ = '-';
-	*buf++ = (ihs / 10) + '0';
-	*buf++ = (ihs % 10) + '0';
+	str_2digits(&buf, ihs);
 	*buf++ = ':';
-	*buf++ = (ims / 10) + '0';
-	*buf++ = (ims % 10) + '0';
-	*buf++ = 0;
+	str_2digits(&buf, ims);
+	if (conf_fmt_isecs) {
+		int iss = (int)(hset * 3600.f) % 60;
+		*buf++ = ':';
+		str_2digits(&buf, iss);
+	}
+	*buf = 0;
 
 	video_clear();
 
 	video_pan_limit = video_draw_text(bufb, 8);
 	video_pan_return = true;
 }
+
 
 void
 video_hour_show_time_date(void)
@@ -407,28 +469,81 @@ video_hour_show_time_date(void)
 
 	gmtime_r(&gmtt, &gmt);
 
-	strcpy(buf, daynames[gmt.tm_wday]);
-	buf += strlen(buf);
+	uint16_t wd = daynames[gmt.tm_wday];
+	*buf++ = wd >> 8;
+	*buf++ = wd;
+
+	int hr = gmt.tm_hour;
+	if (conf_fmt_ampm)
+		hr = 1 + ((hr + 11) % 12);
 
 	*buf++ = ' ';
-	*buf++ = (gmt.tm_hour / 10) + '0';
-	*buf++ = (gmt.tm_hour % 10) + '0';
+	if (!(conf_fmt_ampm && hr < 10))
+	str_2digits(&buf, hr);
 	*buf++ = ':';
-	*buf++ = (gmt.tm_min / 10) + '0';
-	*buf++ = (gmt.tm_min % 10) + '0';
-	*buf++ = ':';
-	*buf++ = (gmt.tm_sec / 10) + '0';
-	*buf++ = (gmt.tm_sec % 10) + '0';
+	str_2digits(&buf, gmt.tm_min);
+	if (conf_fmt_secs) {
+		*buf++ = ':';
+		str_2digits(&buf, gmt.tm_sec);
+	}
+	if (conf_fmt_ampm) {
+		*buf++ = ' ';
+		*buf++ = (gmt.tm_hour >= 12) ? 'P' : 'A';
+		*buf++ = 'M';
+	}
 
 	*buf++ = ' ';
-	itoa(1 + gmt.tm_mon, buf, 10);
-	buf += strlen(buf);
-	*buf++ = '/';
-	itoa(gmt.tm_mday, buf, 10);
-	buf += strlen(buf);
-	*buf++ = '/';
-	itoa(gmt.tm_year + 1900, buf, 10);
-	buf += strlen(buf);
+
+	void
+	append_mon(void)
+	{
+		str_2digits_lno(&buf, 1 + gmt.tm_mon);
+	}
+
+	void
+	append_day(void)
+	{
+		str_2digits_lno(&buf, gmt.tm_mday);
+	}
+
+	inline void
+	append_year(void)
+	{
+		if (conf_fmt_fullyr) {
+			str_2digits(&buf, (gmt.tm_year + 1900) / 100);
+		}
+		str_2digits(&buf, gmt.tm_year % 100);
+	}
+
+	switch (conf_fmt_date) {
+	case 0:
+		append_mon();
+		*buf++ = '/';
+		append_day();
+		*buf++ = '/';
+		append_year();
+		*buf = 0;
+		break;
+	case 1:
+		append_day();
+		*buf++ = '-';
+		append_mon();
+		*buf++ = '-';
+		append_year();
+		break;
+	case 2:
+		append_year();
+		*buf++ = '-';
+		append_mon();
+		*buf++ = '-';
+		append_day();
+		break;
+	case 3:
+		append_day();
+		break;
+	}
+
+	*buf = 0;
 
 	video_clear();
 
@@ -460,34 +575,8 @@ static uint32_t select_last_activity = 0;
 static int select_index;
 static int select_editsub_index;
 
-struct select_item {
-	char *label;
-	void *value;
-	float factor; // factor or sub-unit
-	uint16_t flags;
-	uint8_t nsubs; // minus one
-	union {
-		float f;
-		int i;
-	} min_value, max_value;
-	void (*draw_value)(struct select_item * item,
-			   int editsub); // editsub < 0 for not edit mode
-	void (*edit_sub)(struct select_item * item, int repeat_count);
-	void (*edit_done)(struct select_item * item);
-	//void (*short_press)();
-	//void (*long_press)();
-	//void (*next_press)();
-	
-};
-
-static char
-to_base_36(int i)
-{
-	return (i < 10 ? '0' : 'A' - 10) + i;
-}
-
 void
-select_item_deg_edit_sub(struct select_item * item, int repeat_count)
+select_item_deg_edit_sub(const struct select_item * item, int repeat_count)
 {
 	float value = *((float *)item->value);
 	bool neg;
@@ -495,7 +584,7 @@ select_item_deg_edit_sub(struct select_item * item, int repeat_count)
 	float maxval = (item->max_value.f ? item->max_value.f : 180.f);
 
 	// sign retaining, do val
-	if (neg = (value < 0.f))
+	if ((neg = (value < 0.f)))
 		value = -value;
 
 	switch (select_editsub_index) {
@@ -519,12 +608,12 @@ select_item_deg_edit_sub(struct select_item * item, int repeat_count)
 
 	*((float *)item->value) = value * (neg ? -1.f : 1.f);
 
+	app_bkpconfig_write();
 	select_item_deg_draw_value(item, select_editsub_index);
 }
 
-
 void
-select_item_deg_draw_value(struct select_item * item, int editsub)
+select_item_deg_draw_value(const struct select_item * item, int editsub)
 {
 	char bufb[30];
 	char *buf = bufb;
@@ -532,7 +621,7 @@ select_item_deg_draw_value(struct select_item * item, int editsub)
 	bool neg;
 
 	// sign retaining, do val
-	if (neg = (value < 0.f))
+	if ((neg = (value < 0.f)))
 		value = -value;
 
 	int val = (int)(value);
@@ -544,15 +633,14 @@ select_item_deg_draw_value(struct select_item * item, int editsub)
 	buf += strlen(buf);
 
 	*buf++ = ' ';
-	*buf++ = 0;
+	*buf = 0;
 	int xc = video_draw_text(bufb, 0);
 
 	buf = bufb;
-	*buf++ = to_base_36(val / 10);
-	*buf++ = (val % 10) + '0';
+	str_2digits(&buf, val);
 	*buf++ = '&';
 
-	*buf++ = 0;
+	*buf = 0;
 
 	SELECT_EDITSUB_POINT(0, xc);
 
@@ -560,12 +648,11 @@ select_item_deg_draw_value(struct select_item * item, int editsub)
 	buf = bufb;
 
 	if (item->factor) {
-		*buf++ = to_base_36(fval / 10);
-		*buf++ = (fval % 10) + '0';
+		str_2digits(&buf, fval);
 		*buf++ = '\'';
 	}
 
-	*buf++ = 0;
+	*buf = 0;
 
 	SELECT_EDITSUB_POINT(1, xc);
 
@@ -577,7 +664,7 @@ select_item_deg_draw_value(struct select_item * item, int editsub)
 	else if (item->flags & SELECT_ITEM_FLAGS_SIGN_NS)
 		*buf++ = (neg ? 'S' : 'N');
 
-	*buf++ = 0;
+	*buf = 0;
 
 	SELECT_EDITSUB_POINT(2, xc);
 
@@ -590,21 +677,22 @@ select_item_deg_draw_value(struct select_item * item, int editsub)
 
 
 void
-select_item_single_int_edit_sub(struct select_item * item, int repeat_count)
+select_item_tz_edit_sub(const struct select_item * item, UNUSED int repeat_count)
 {
 	// check case too
 	int *valuep = (int *)item->value;
 
-	*valuep += (item->factor ? item->factor : 1);
+	*valuep += 60;
 
 	if (*valuep > item->max_value.i)
 		*valuep = item->min_value.i;
 
+	app_bkpconfig_write();
 	select_item_int_draw_value(item, 0);
 }
 
 void
-select_item_int_draw_value(struct select_item * item, int editsub)
+select_item_int_draw_value(const struct select_item * item, int editsub)
 {
 	char bufb[30];
 	char *buf = bufb;
@@ -612,8 +700,7 @@ select_item_int_draw_value(struct select_item * item, int editsub)
 
 	int val = *((int *)item->value) / (item->factor ? item->factor : 1);
 
-	// sign retaining, do val
-	if (neg = (val < 0)) {
+	if ((neg = (val < 0))) {
 		val = -val;
 	}
 
@@ -623,7 +710,7 @@ select_item_int_draw_value(struct select_item * item, int editsub)
 	buf += strlen(buf);
 
 	*buf++ = ' ';
-	*buf++ = 0;
+	*buf = 0;
 	int xc = video_draw_text(bufb, 0);
 
 	buf = bufb;
@@ -638,12 +725,143 @@ select_item_int_draw_value(struct select_item * item, int editsub)
 		*buf++ = to_base_36(val / 10);
 
 	*buf++ = (val % 10) + '0';
-	*buf++ = 0;
+	*buf = 0;
 
-	if (editsub == 0) {
-		video_pan_limit = xc;
-		video_pan_return = false;
+	SELECT_EDITSUB_POINT(0, xc);
+
+	xc = video_draw_text(bufb, xc);
+
+	SELECT_EDITSUB_END(xc);
+}
+
+
+void
+select_item_display_edit_sub(const struct select_item * item, UNUSED int repeat_count)
+{
+	switch (select_editsub_index) {
+	case 0: //brightness
+		conf_bright++;
+		if (conf_bright > 9)
+			conf_bright = 0;
+		m7219_send_brightness();
+		break;
+	case 1: //speed
+		conf_speed++;
+		if (conf_speed > 3)
+			conf_speed = 0;
+		break;
+	case 2: //tick
+		conf_div++;
+		if (conf_div > 6)
+			conf_div = 0;
+		break;
+
 	}
+
+	app_bkpconfig_write();
+	select_item_display_draw_value(item, select_editsub_index);
+}
+
+void
+select_item_display_draw_value(const struct select_item * item, int editsub)
+{
+	char bufb[30];
+	char *buf = bufb;
+
+	static const char * const legend_div = "NOSCSBSRFCFBFR";
+
+	video_clear();
+
+	strcpy(buf, item->label);
+	buf += strlen(buf);
+
+	*buf = 0;
+
+	int xc = video_draw_text(bufb, 0);
+
+	SELECT_EDITSUB_POINT(0, xc);
+
+	buf = bufb;
+
+	*buf++ = ' ';
+	*buf++ = (conf_bright % 10) + '0';
+	*buf++ = ' ';
+	*buf++ = 'S';
+	*buf++ = 'P';
+	*buf++ = 'D';
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+
+	SELECT_EDITSUB_POINT(1, xc);
+
+	buf = bufb;
+
+	*buf++ = ' ';
+	*buf++ = conf_speed + '1';
+	*buf++ = ' ';
+	*buf++ = 'T';
+	*buf++ = 'I';
+	*buf++ = 'K';
+	*buf++ = ' ';
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+
+	SELECT_EDITSUB_POINT(2, xc);
+
+	buf = bufb;
+
+	*buf++ = legend_div[conf_div * 2];
+	*buf++ = legend_div[conf_div * 2 + 1];
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+
+	SELECT_EDITSUB_END(xc);
+}
+
+
+void
+select_item_chime_edit_sub(const struct select_item * item, UNUSED int repeat_count)
+{
+	switch (select_editsub_index) {
+	case 0: //visual
+		conf_vchime++;
+		if (conf_vchime > 2)
+			conf_vchime = 0;
+		break;
+	}
+
+	app_bkpconfig_write();
+	select_item_chime_draw_value(item, select_editsub_index);
+}
+
+void
+select_item_chime_draw_value(const struct select_item * item, int editsub)
+{
+	char bufb[30];
+	char *buf = bufb;
+
+	static const char * const legend_vchime = "NOTIPH";
+
+	video_clear();
+
+	strcpy(buf, item->label);
+	buf += strlen(buf);
+
+	*buf++ = ' ';
+	*buf = 0;
+
+	int xc = video_draw_text(bufb, 0);
+
+	SELECT_EDITSUB_POINT(0, xc);
+
+	buf = bufb;
+
+	*buf++ = legend_vchime[conf_vchime * 2];
+	*buf++ = legend_vchime[conf_vchime * 2 + 1];
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 
@@ -654,7 +872,7 @@ select_item_int_draw_value(struct select_item * item, int editsub)
 struct tm select_item_time_buf;
 
 void
-select_item_time_edit_sub(struct select_item * item, int repeat_count)
+select_item_time_edit_sub(const struct select_item * item, UNUSED int repeat_count)
 {
 	struct tm *tbuf = ((struct tm *)item->value);
 
@@ -680,7 +898,7 @@ select_item_time_edit_sub(struct select_item * item, int repeat_count)
 }
 
 void
-select_item_time_edit_done(struct select_item * item)
+select_item_time_edit_done(const struct select_item * item)
 {
 	struct tm *tbuf = ((struct tm *)item->value);
 	struct tm ltm;
@@ -698,11 +916,10 @@ select_item_time_edit_done(struct select_item * item)
 }
 
 void
-select_item_time_draw_value(struct select_item * item, int editsub)
+select_item_time_draw_value(const struct select_item * item, int editsub)
 {
 	char bufb[30];
 	char *buf = bufb;
-	bool neg;
 
 	struct tm *tbuf = ((struct tm *)item->value);
 
@@ -717,17 +934,16 @@ select_item_time_draw_value(struct select_item * item, int editsub)
 	buf += strlen(buf);
 
 	*buf++ = ' ';
-	*buf++ = 0;
+	*buf = 0;
 	int xc = video_draw_text(bufb, 0);
 
 	SELECT_EDITSUB_POINT(0, xc);
 
 	buf = bufb;
 
-	*buf++ = (tbuf->tm_hour / 10) + '0';
-	*buf++ = (tbuf->tm_hour % 10) + '0';
+	str_2digits(&buf, tbuf->tm_hour);
 	*buf++ = ':';
-	*buf++ = 0;
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 
@@ -735,19 +951,17 @@ select_item_time_draw_value(struct select_item * item, int editsub)
 
 	buf = bufb;
 
-	*buf++ = (tbuf->tm_min / 10) + '0';
-	*buf++ = (tbuf->tm_min % 10) + '0';
+	str_2digits(&buf, tbuf->tm_min);
 	*buf++ = ':';
-	*buf++ = 0;
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 	SELECT_EDITSUB_POINT(2, xc);
 
 	buf = bufb;
 
-	*buf++ = (tbuf->tm_sec / 10) + '0';
-	*buf++ = (tbuf->tm_sec % 10) + '0';
-	*buf++ = 0;
+	str_2digits(&buf, tbuf->tm_sec);
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 	SELECT_EDITSUB_END(xc);
@@ -755,11 +969,11 @@ select_item_time_draw_value(struct select_item * item, int editsub)
 
 
 void
-select_item_date_edit_sub(struct select_item * item, int repeat_count)
+select_item_date_edit_sub(const struct select_item * item, UNUSED int repeat_count)
 {
 	struct tm *tbuf = ((struct tm *)item->value);
 
-	uint8_t monsizes[2][12] = {
+	static const uint8_t days_in_month[2][12] = {
 		{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
 		{31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
 	};
@@ -778,7 +992,7 @@ select_item_date_edit_sub(struct select_item * item, int repeat_count)
 		break;
 	case 2: //dy
 		tbuf->tm_mday++;
-		while (tbuf->tm_mday >= monsizes[tbuf->tm_year % 4 ? 1 : 0][tbuf->tm_mon])
+		if (tbuf->tm_mday > days_in_month[tbuf->tm_year % 4 ? 1 : 0][tbuf->tm_mon])
 			tbuf->tm_mday = 1;
 		break;
 	}
@@ -786,7 +1000,7 @@ select_item_date_edit_sub(struct select_item * item, int repeat_count)
 }
 
 void
-select_item_date_edit_done(struct select_item * item)
+select_item_date_edit_done(const struct select_item * item)
 {
 	struct tm *tbuf = ((struct tm *)item->value);
 	struct tm ltm;
@@ -804,11 +1018,10 @@ select_item_date_edit_done(struct select_item * item)
 }
 
 void
-select_item_date_draw_value(struct select_item * item, int editsub)
+select_item_date_draw_value(const struct select_item * item, int editsub)
 {
 	char bufb[30];
 	char *buf = bufb;
-	bool neg;
 
 	struct tm *tbuf = ((struct tm *)item->value);
 
@@ -826,7 +1039,7 @@ select_item_date_draw_value(struct select_item * item, int editsub)
 	*buf++ = 'Y';
 	*buf++ = '2';
 	*buf++ = '0';
-	*buf++ = 0;
+	*buf = 0;
 	int xc = video_draw_text(bufb, 0);
 
 	SELECT_EDITSUB_POINT(0, xc);
@@ -835,11 +1048,10 @@ select_item_date_draw_value(struct select_item * item, int editsub)
 
 	int modyr = tbuf->tm_year - 100;
 
-	*buf++ = (modyr / 10) + '0';
-	*buf++ = (modyr % 10) + '0';
+	str_2digits(&buf, modyr);
 	*buf++ = ' ';
 	*buf++ = 'M';
-	*buf++ = 0;
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 	SELECT_EDITSUB_POINT(1, xc);
@@ -848,20 +1060,101 @@ select_item_date_draw_value(struct select_item * item, int editsub)
 
 	int modmo = tbuf->tm_mon + 1;
 
-	*buf++ = (modmo / 10) + '0';
-	*buf++ = (modmo % 10) + '0';
+	str_2digits(&buf, modmo);
 	*buf++ = ' ';
 	*buf++ = 'D';
-	*buf++ = 0;
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 	SELECT_EDITSUB_POINT(2, xc);
 
 	buf = bufb;
 
-	*buf++ = (tbuf->tm_mday / 10) + '0';
-	*buf++ = (tbuf->tm_mday % 10) + '0';
-	*buf++ = 0;
+	str_2digits(&buf, tbuf->tm_mday);
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+	SELECT_EDITSUB_END(xc);
+}
+
+//int select_item_fmt_tmp;
+
+void
+select_item_fmt_edit_sub(const struct select_item * item, UNUSED int repeat_count)
+{
+	
+	switch (select_editsub_index) {
+	case 0: //ampm
+		conf_fmt_ampm = !conf_fmt_ampm;
+		break;
+	case 1: //secs
+		conf_fmt_secs = !conf_fmt_secs;
+		break;
+	case 2: //dform
+		if (++conf_fmt_date > 3)
+			conf_fmt_date = 0;
+		break;
+	}
+	app_bkpconfig_write();
+	select_item_fmt_draw_value(item, select_editsub_index);
+}
+
+
+void
+select_item_fmt_draw_value(const struct select_item * item, int editsub)
+{
+	char bufb[30];
+	char *buf = bufb;
+
+	video_clear();
+
+	strcpy(buf, item->label);
+	buf += strlen(buf);
+
+	*buf++ = ' ';
+	*buf++ = 'H';
+	*buf++ = 'R';
+	*buf++ = ' ';
+	*buf = 0;
+
+	int xc = video_draw_text(bufb, 0);
+	SELECT_EDITSUB_POINT(0, xc);
+
+	buf = bufb;
+
+	*buf++ = (legend_ampm[conf_fmt_ampm ? 1 : 0] >> 8);
+	*buf++ = (legend_ampm[conf_fmt_ampm ? 1 : 0]);
+
+	*buf++ = ' ';
+	*buf++ = 'S';
+	*buf++ = 'E';
+	*buf++ = 'C';
+	*buf++ = ' ';
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+	SELECT_EDITSUB_POINT(1, xc);
+
+	buf = bufb;
+
+	*buf++ = (legend_secs[conf_fmt_secs ? 1 : 0] >> 8);
+	*buf++ = (legend_secs[conf_fmt_secs ? 1 : 0]);
+
+	*buf++ = ' ';
+	*buf++ = 'D';
+	*buf++ = 'A';
+	*buf++ = 'T';
+	*buf++ = ' ';
+	*buf = 0;
+
+	xc = video_draw_text(bufb, xc);
+	SELECT_EDITSUB_POINT(2, xc);
+
+	buf = bufb;
+
+	*buf++ = (legend_date[conf_fmt_date] >> 8);
+	*buf++ = (legend_date[conf_fmt_date]);
+	*buf = 0;
 
 	xc = video_draw_text(bufb, xc);
 	SELECT_EDITSUB_END(xc);
@@ -869,7 +1162,14 @@ select_item_date_draw_value(struct select_item * item, int editsub)
 
 
 
+
 const struct select_item select_items[] = {
+	{
+		.label = "BRT",
+		.nsubs = 2,
+		.draw_value = select_item_display_draw_value,
+		.edit_sub = &select_item_display_edit_sub
+	},
 	{
 		.label = "TZ",
 		.value = &conf_tz,
@@ -877,7 +1177,7 @@ const struct select_item select_items[] = {
 		.min_value = {i: -720},
 		.max_value = {i: 720},
 		.draw_value = select_item_int_draw_value,
-		.edit_sub = &select_item_single_int_edit_sub
+		.edit_sub = &select_item_tz_edit_sub
 	},
 	{
 		.label = "TIM",
@@ -902,7 +1202,7 @@ const struct select_item select_items[] = {
 		.value = &conf_lat,
 		.factor = 60,
 		.nsubs = 2,
-		.max_value = {f: 67.f},
+		.max_value = {f: 90.f},
 		.flags = SELECT_ITEM_FLAGS_SIGN_NS,
 		.draw_value = select_item_deg_draw_value,
 		.edit_sub = &select_item_deg_edit_sub
@@ -915,6 +1215,19 @@ const struct select_item select_items[] = {
 		.flags = SELECT_ITEM_FLAGS_SIGN_EW,
 		.draw_value = select_item_deg_draw_value,
 		.edit_sub = &select_item_deg_edit_sub
+	},
+	{
+		.label = "FMT",
+		.value = &conf_fmt_ampm,
+		.nsubs = 2,
+		.draw_value = select_item_fmt_draw_value,
+		.edit_sub = &select_item_fmt_edit_sub
+	},
+	{
+		.label = "BEL",
+		//.nsubs = 2,
+		.draw_value = select_item_chime_draw_value,
+		.edit_sub = &select_item_chime_edit_sub
 	},
 	{
 	}
@@ -930,7 +1243,7 @@ video_select_begin(void)
 	select_index = 0;
 	select_editsub_index = -1;
 
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	si->draw_value(si, select_editsub_index);
 
 	select_last_activity = ticks;
@@ -938,9 +1251,9 @@ video_select_begin(void)
 }
 
 void
-video_select_draw_value()
+video_select_draw_value(void)
 {
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	si->draw_value(si, select_editsub_index);
 
 }
@@ -951,14 +1264,14 @@ video_select_next(void)
 	select_last_activity = ticks;
 	if (!select_items[++select_index].draw_value)
 		select_index = 0;
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	si->draw_value(si, -1);
 }
 
 void
 video_select_edit(void)
 {
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	if (select_editsub_index >= si->nsubs) {
 		video_ui_state = SELECT;
 		select_editsub_index = -1;
@@ -979,23 +1292,22 @@ video_select_edit(void)
 void
 video_edit_accept(void)
 {
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	if (select_editsub_index >= si->nsubs) {
 		if (si->edit_done)
 			si->edit_done(si);
 	}
-	// TODO actually accept it
-	// for now, leave select mode and go to next item
 	video_ui_state = SELECT;
 	input_button_flush_all();
-	// TODO actually move on to the next subfield, if any
+
+	// return to select or edit mode, as needed
 	video_select_edit();
 }
 
 void
 video_edit_change(int repeat_count)
 {
-	struct select_item *si = &select_items[select_index];
+	const struct select_item *si = &select_items[select_index];
 	si->edit_sub(si, repeat_count);
 
 	select_last_activity = ticks;
@@ -1004,8 +1316,7 @@ video_edit_change(int repeat_count)
 void
 video_play(void)
 {
-	static uint32_t lasttime = 0;
-	static uint32_t lastrtc = 0;
+	static volatile uint32_t lasttime = 0;
 	static int repeat_count = 0;
 	uint64_t sreload = ticks;
 	int32_t sticks = systick_get_value();
@@ -1024,7 +1335,7 @@ video_play(void)
 		}
 		break;
 	case SELECT:
-		if (select_last_activity && (ticks - 32000 - select_last_activity < INT_MAX)) {
+		if (select_last_activity && (ticks - CONF_SET_TIMEOUT_MS - select_last_activity < INT_MAX)) {
 			video_hour_begin();
 			break;
 		}
@@ -1059,19 +1370,67 @@ video_play(void)
 		break;
 	}
 
+	static int lasthour = -1;
 	int phour;
+	float phourf;
 	switch (video_ui_state) {
 	case HOUR:
-		phour = (int)phour_get(rtc_get_counter_val(), conf_lat, conf_lon, conf_tz,
+		phourf = phour_get(rtc_get_counter_val(), conf_lat, conf_lon, conf_tz,
 			&video_hour_current_start, &video_hour_current_end);
+
+		phour = (int) phourf;
+		phourf -= phour;
+
+		if (phour < 0)
+			phour = 7;
 
 		video_clear_glyph();
 		//video_bitblt(glyphs_by_num[(ticks / 1000) % (sizeof(glyphs_by_num)/sizeof(glyphs_by_num[0]))], 7, 8, 0, 0);
 		video_bitblt(glyphs_by_num[phour], 7, 8, 0, 0);
+
+		if ((conf_div < 4) || (ticks % 2000 > 1000 && phour < 7)) {
+			switch (conf_div) {
+			case 1:
+			case 4:
+				if (phourf < CONF_DIV_EDGE_FRACTION)
+					video_plot(0, 7, true);
+				else if (phourf > (1 - CONF_DIV_EDGE_FRACTION))
+					video_plot(7, 7, true);
+				break;
+			case 2:
+			case 5:
+				video_plot((int)(phourf * 8), 7, true);
+				break;
+			case 3:
+			case 6:
+				video_plot(7, (int)(phourf * 8), true);
+				break;
+			}
+		}
+
+		if (lasthour == -1)
+			lasthour = phour;
+
+		if (lasthour != phour) {
+			switch (conf_vchime) {
+			case 1:
+				video_hour_show_time_date();
+				break;
+			case 2:
+				video_hour_show_current();
+				break;
+			}
+		}
+
+		lasthour = phour;
 		break;
 	case EDIT:
 		video_clear();
 		video_select_draw_value();
+		break;
+	case SELECT:
+		// nothing to do, redraw on editor demand
+		break;
 	}
 
 
@@ -1086,25 +1445,26 @@ video_play(void)
 void
 m7219_setup(void)
 {
-	m7219_send(SPI1, 0xC00);
-	m7219_send(SPI1, 0xC00);
-	m7219_send(SPI1, 0xA03);
-	m7219_send(SPI1, 0xB07);
-	m7219_send(SPI1, 0xF00);
-	m7219_send(SPI1, 0xC01);
-
-	m7219_show_splash(0);
+	m7219_send(0xC00);
+	m7219_send(0xC00);
+	m7219_send(0xA0F);
+	m7219_send(0xB07);
+	m7219_send(0xF00);
+	m7219_send(0xC01);
 }
 
 void
 m7219_show_splash(int idx)
 {
 	for (int i = 0; i < 7; i++)
-		m7219_send(SPI1, ((i + 1) << 8) + bootimgs_by_num[idx][i]);
-	m7219_send(SPI1, 0x800);
+		m7219_send(((i + 1) << 8) + bootimgs_by_num[idx][i]);
+	m7219_send(0x800);
 }
 
-int main(void)
+
+
+int
+main(void)
 {
 	clock_setup();
 	gpio_setup();
@@ -1112,26 +1472,26 @@ int main(void)
 
 	m7219_setup();
 
-
-	uint8_t bword = 0;
-
 	m7219_show_splash(1);
 	rtc_setup();
+
+	m7219_send_brightness();
+	m7219_show_splash(2);
+	// TODO acquire time and location from a GPS or other receiver
 	m7219_show_splash(3);
 
 	uint32_t nextst = ticks + 1000;
 	for(;;) {
-		while(nextst - ticks < INT_MAX);
+		while(nextst - ticks < INT_MAX) __WFI();
 
 		input_process();
 		video_pan();
 		video_play();
 
 		for (int i = 0; i < 8; i++)
-			m7219_send(SPI1, ((i + 1) << 8) + video_window(i));
-		m7219_send(SPI1, 0xC01);
+			m7219_send(((i + 1) << 8) + VIDEO_WINDOW_FN(i));
 
-		nextst += 125;
+		nextst += frame_times[conf_speed];
 	}
 }
 

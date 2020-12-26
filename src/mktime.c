@@ -90,6 +90,8 @@
 
 #include <time.h>
 
+time_t my_mktime(struct tm * tmp);
+
 static int	mon_lengths[2][MONSPERYEAR] = {
 	{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },
 	{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }

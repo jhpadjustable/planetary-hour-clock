@@ -35,18 +35,29 @@ video_window(int y)
 {
 	int cxl = (video_xpan >> 3);
 	int cxr = ((video_xpan + 7) >> 3);
-	// I don't think this happens
-#if 0
-	if (video_xpan >= ((sizeof video_buf[0]) - 1) * 8) {
-		return (video_buf[y][sizeof(video_buf[0])-1] << (-video_xpan & 7)) & 0xff;
-	}
-#endif
-	// but it would be cool if this did
+
 	if (cxr == 0) {
 		return (video_buf[y][0] >> (-video_xpan)) & 0xff;
 	}
 	int r = (video_buf[y][cxl] << 8) | video_buf[y][cxr];
-	return (r >> (-video_xpan & 7)) & 0xff;
+	return (r >> ((~video_xpan) & 7)) & 0xff;
+}
+
+
+uint8_t
+video_window_rot(int y)
+{
+	y = 7 - y;
+	y += video_xpan;
+	int cxl = (y >> 3);
+
+	if (y < 0)
+		return 0;
+	uint8_t word = 0;
+	for (int x = 0; x < 8; x++) {
+		word = (word << 1) + ((video_buf[x][cxl] >> ((~y) & 7)) & 1);
+	}
+	return word;
 }
 
 
@@ -63,6 +74,16 @@ void video_bitblt(uint8_t *src, int sw, int sh, int dx, int dy)
 			video_buf[dy + yc][dxr++] |= bb << (8 - dxc);
 		}
 	}
+}
+
+void
+video_plot(int x, int y, bool draw)
+{
+	int dxl = (x >> 3);
+	if (draw)
+		video_buf[y][dxl] |= 1 << (~x & 7);
+	else
+		video_buf[y][dxl] &= ~(1 << (~x & 7));
 }
 
 
@@ -97,3 +118,4 @@ video_draw_text(char *buf, int xc)
 	return xc;
 }
 
+// vim: ts=8 sts=8 sw=8 noet : 

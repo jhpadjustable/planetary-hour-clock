@@ -1,6 +1,17 @@
 #include <sys/types.h>
 
 
+uint8_t glyph_bootimg0[8] = {
+	0b00010000,
+	0b00010000,
+	0b00010000,
+	0b11111110,
+	0b00010000,
+	0b00010000,
+	0b00010000,
+	0
+};
+
 uint8_t glyph_bootimg1[8] = {
 	0b00010000,
 	0b00010000,
@@ -34,22 +45,11 @@ uint8_t glyph_bootimg3[8] = {
 	0
 };
 
-uint8_t glyph_bootimg4[8] = {
-	0b00111000,
-	0b01010100,
-	0b10010010,
-	0b11111110,
-	0b10010010,
-	0b01010100,
-	0b00111000,
-	0
-};
-
 uint8_t *bootimgs_by_num[] = {
+	glyph_bootimg0,
 	glyph_bootimg1,
 	glyph_bootimg2,
 	glyph_bootimg3,
-	glyph_bootimg4,
 };
 
 
@@ -74,6 +74,17 @@ uint8_t glyph_venus[8] = {
 	0b01111100,
 	0b00010000,
 	0b00000000
+};
+
+uint8_t glyph_earth[8] = {
+	0b00111000,
+	0b01010100,
+	0b10010010,
+	0b11111110,
+	0b10010010,
+	0b01010100,
+	0b00111000,
+	0
 };
 
 uint8_t glyph_mars[8] = {
@@ -131,14 +142,15 @@ uint8_t glyph_saturn[8] = {
 	0b00000000
 };
 
-uint8_t *glyphs_by_num[7] = {
+uint8_t *glyphs_by_num[] = {
 	glyph_saturn,
 	glyph_jupiter,
 	glyph_mars,
 	glyph_sun,
 	glyph_venus,
 	glyph_mercury,
-	glyph_moon
+	glyph_moon,
+	glyph_earth
 };
 
 

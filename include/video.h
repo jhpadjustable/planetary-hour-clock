@@ -12,11 +12,12 @@ typedef enum {
 } video_ui_state_t;
 
 #undef INTERFACE
-void video_play(void);
 int video_draw_text(char *buf,int xc);
 void video_pan(void);
 void video_bitblt(uint8_t *src,int sw,int sh,int dx,int dy);
+void video_plot(int x,int y,bool draw);
 uint8_t video_window(int y);
+uint8_t video_window_rot(int y);
 void video_clear_glyph(void);
 void video_clear(void);
 extern bool video_pan_return;

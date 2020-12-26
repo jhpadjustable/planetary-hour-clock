@@ -11,52 +11,59 @@ LD=arm-none-eabi-ld
 OBJCOPY=arm-none-eabi-objcopy
 OBJDUMP=arm-none-eabi-objdump
 
+OPENCM3_ROOT=libopencm3
+
 BUILDDIR=build
 BUILDBOARDDIR=$(BUILDDIR)/$(BOARD)
+
+
+###
+### end of user conf
+###
 
 BINARY = main
 
 PROJDIR=$(realpath .)
 SRCDIR=./src
 
-#PLAT_FLAGS=-DSTM32F3 -mthumb -mcpu=cortex-m4 -mhard-float
-#VARIANT=stm32f3
-
-MAIN_CFILES=src/main.c src/glyphs.c src/video.c src/mktime.c
+MAIN_CFILES=$(wildcard $(SRCDIR)/*.c)
+# src/main.c src/glyphs.c src/video.c src/mktime.c
 
 
-OPENCM3_ROOT=/st/build/libopencm3
 OPENCM3_LIBRARY=$(OPENCM3_ROOT)/lib/libopencm3_$(VARIANT).a
 OPENCM3_INCLUDE=-I$(OPENCM3_ROOT)/include
 OPENCM3_LDFLAGS=-L$(OPENCM3_ROOT)/lib $(OPENCM3_LIBRARY)
 
 
+
+# A brief wish is included in the image but not used by code.
+# If you don't want that for some reason, make with OMIT_BLESSING=1
+
+ifndef OMIT_BLESSING
+UNDEFINED_SYMBOLS += -Wl,--undefined=blessing
+endif
+
+
 OBJS+=$(MAIN_CFILES:.c=.o)
-# VPATH=./rtos:./$(RTOS_PORTDIR)
-
-UNDEFINED_SYMBOLS+=-Wl,--undefined=rtc_set_counter_val
-
-
 BUILD_OBJS=$(addprefix $(BUILDBOARDDIR)/, $(OBJS))
+
+#DEPS+=$(MAIN_CFILES:.c=.d)
+DEPS+=$(BUILD_OBJS:.o=.d)
 
 LDSCRIPT=$(wildcard $(OPENCM3_ROOT)/lib/stm32/*/$(CHIP).ld)
 #LDSCRIPT=base.ld
 
 
 
-CFLAGS+= -std=c99 -ggdb3
+CFLAGS+= -std=c99 -ggdb3 
 CFLAGS+= $(GCC_SPECS)
 CFLAGS+= -Wall -Wundef
 CFLAGS+= -Wextra -Wshadow -Wimplicit-function-declaration -Wredundant-decls -Wmissing-prototypes -Wstrict-prototypes
-CFLAGS+= -fno-common -ffunction-sections -fdata-sections -fno-builtin
-CFLAGS+= -MD -Os
-#CFLAGS+= -DappUSE_HARD_FAULT_HANDLER=1
-# listings
-#CFLAGS+= -Wa,-adhln
+CFLAGS+= -fno-common -ffunction-sections -fdata-sections -fno-builtin -Wno-multichar
+CFLAGS+= -MMD -MP -Os
 CFLAGS+= -I$(realpath ./include)
 CFLAGS+= $(OPENCM3_INCLUDE) \
         $(RTOS_INCLUDE) \
-        $(BOARD_CONFIG) \
         $(PLAT_FLAGS) \
         $(TEMP_CFLAGS)
 
@@ -85,16 +92,24 @@ $(BUILD_OBJS): $(BUILDBOARDDIR)/%.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $<
 
 
+$(MAIN_CFILES): include/config.h
+
+
+-include $(DEPS)
+
 
 stats:
 	@arm-none-eabi-objdump -t $(BUILDBOARDDIR)/$(BINARY).elf | sort > $(BUILDBOARDDIR)/$(BINARY).nm
 	@arm-none-eabi-size `find $(BUILDBOARDDIR) -name \*.o` $(BUILDBOARDDIR)/$(BINARY).elf
 
 clean:
-	rm -rf $(BUILDDIR)
+	rm -rf $(BUILDDIR) $(DEPS)
 
-qclean:
+tclean:
 	rm -rf $(BUILDBOARDDIR)
 
-.PHONY: clean all program stats
+debug:
+	-arm-none-eabi-gdb -x ".gdbinit-bluepill" "$@"
+
+.PHONY: clean all program stats debug clobber
 
