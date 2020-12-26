@@ -1,0 +1,11 @@
+#target remote localhost:3333
+target extended-remote /dev/bmpgdb
+monitor swdp_scan
+attach 1
+file build/bluepill/main.elf
+compare-sections
+set mem inaccessible-by-default off
+
+source .gdbinit-armex
+
+
