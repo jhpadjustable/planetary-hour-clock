@@ -1,6 +1,6 @@
 # Planetary hour clock for STM32 and 8x8 LED matrix
 
-![img/front.jpg]
+![Author's construction](img/front.jpg)
 
 This firmware implements a planetary hour clock with the STM32 processor and MAX7219 8x8 LED matrix driver. It started as a quick holiday project and isn't especially optimized, but works well.
 
